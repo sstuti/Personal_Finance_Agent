@@ -1,0 +1,14 @@
+# Ignore Excel files
+*.xlsx
+
+# Ignore environment files
+.env
+.venv
+
+# Ignore Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
