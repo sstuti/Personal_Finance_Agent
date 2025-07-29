@@ -12,3 +12,5 @@ __pycache__/
 
 # Ignore Jupyter Notebook checkpoints
 .ipynb_checkpoints/
+
+.gradio

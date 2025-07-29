@@ -287,4 +287,4 @@ with gr.Blocks(title="Finance Tracker") as app:
             )
 
 if __name__ == "__main__":
-    app.launch(share=True)
+    app.launch()
