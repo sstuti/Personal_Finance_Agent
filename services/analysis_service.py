@@ -1,6 +1,6 @@
 import os
 import pandas as pd
-import sqlite3
+from pandasql import sqldf
 from datetime import datetime
 import json
 from typing import Dict, Any
@@ -16,8 +16,7 @@ class AnalysisService:
 
     def _get_schema(self) -> str:
         return """
-        Table name: Expenses
-        Columns:
+        Available Columns:
         - Date DATE             # Format: YYYY-MM-DD
         - Description TEXT      # Transaction description
         - Amount FLOAT         # Transaction amount (positive number)
@@ -25,10 +24,15 @@ class AnalysisService:
         - Type TEXT           # Either "Income" or "Expense"
         
         Instructions: 
-        1. Table name is 'Expenses'
-        2. Return ONLY the SQL query
-        3. Do not include any explanations or prefixes
-        4. Do not include 'SQL Query:' or similar text
+        1. Output format must be EXACTLY like these examples (no prefixes, no explanations):
+           SELECT * FROM df WHERE Type = 'Expense'
+           SELECT Category, SUM(Amount) FROM df GROUP BY Category
+           
+        2. IMPORTANT:
+           - Start directly with SELECT
+           - Use "df" as the table name
+           - Do not include "SQL query:" or any other prefix
+           - No comments or explanations, just the SQL query
         """
 
     def analyze_spending(self, query: str) -> str:
@@ -58,38 +62,73 @@ class AnalysisService:
             model_output = get_sql_query(model, query)
             sql_query = model_output.message if hasattr(model_output, 'message') else str(model_output)
             sql_query = sql_query.strip()
+            
+            # Clean up the SQL query by removing common prefixes and extra whitespace
+            common_prefixes = ['sql query:', 'query:', 'sql:']
+            for prefix in common_prefixes:
+                if sql_query.lower().startswith(prefix):
+                    sql_query = sql_query[len(prefix):].strip()
+            
+            # Replace 'Expenses' with 'df' in the query if needed
+            sql_query = sql_query.replace(' Expenses ', ' df ')
+            sql_query = sql_query.replace('FROM Expenses', 'FROM df')
+            sql_query = sql_query.replace('JOIN Expenses', 'JOIN df')
             print(f"Query was: {sql_query}")
             
-            # Execute SQL query
-            conn = sqlite3.connect(':memory:')
-            df.to_sql('Expenses', conn, index=False, if_exists='replace')
-            
+            # Execute SQL query directly on the DataFrame
             try:
                 if not isinstance(sql_query, str):
                     raise ValueError(f"Invalid SQL query type: {type(sql_query)}. Expected string.")
-                result_df = pd.read_sql_query(sql_query, conn)
-                filtered_df = result_df
+                
+                # Define the local environment for SQL query execution
+                env = {'df': df}
+                
+                # Execute the query with the local environment
+                filtered_df = sqldf(sql_query, env)
+                
+                # If the query result is empty, use the original dataframe structure
+                if filtered_df.empty:
+                    filtered_df = df.head(0)  # Get empty dataframe with same structure
+                
+                # For aggregate queries that don't return all columns, merge with original structure
+                if not all(col in filtered_df.columns for col in ['Date', 'Amount', 'Type', 'Category']):
+                    # Create a temporary dataframe with all required columns
+                    temp_df = pd.DataFrame(columns=['Date', 'Amount', 'Type', 'Category'])
+                    # Merge with the filtered results, keeping all columns from both
+                    filtered_df = pd.concat([filtered_df, temp_df], axis=1)
+                    filtered_df = filtered_df.loc[:, ~filtered_df.columns.duplicated()]
+                
+                # Convert data types where columns exist
+                if 'Date' in filtered_df.columns:
+                    filtered_df['Date'] = pd.to_datetime(filtered_df['Date'])
+                if 'Amount' in filtered_df.columns:
+                    filtered_df['Amount'] = pd.to_numeric(filtered_df['Amount'], errors='coerce').fillna(0)
+                
             except Exception as e:
                 print(f"Error executing SQL query: {e}")
                 print(f"Query was: {sql_query}")
-                filtered_df = df
-            finally:
-                conn.close()
-                
-            # Prepare data context for analysis
+                raise ValueError(f"Failed to execute SQL query: {str(e)}")
+
+            print(filtered_df)
+
+            # Prepare data context for analysis using filtered data only
             data_context = {
                 'total_transactions': len(filtered_df),
-                'date_range': (f"from {df['Date'].min().strftime('%Y-%m-%d')} to {df['Date'].max().strftime('%Y-%m-%d')}" 
-                             if 'Date' in df.columns else "all time"),
-                'categories': (filtered_df['Category'].unique().tolist() 
-                             if 'Category' in filtered_df.columns else df['Category'].unique().tolist()),
-                'total_spending': (filtered_df[filtered_df['Type'] == 'Expense']['Amount'].sum() 
+                'date_range': (f"from {filtered_df['Date'].min().strftime('%Y-%m-%d')} to {filtered_df['Date'].max().strftime('%Y-%m-%d')}"
+                             if 'Date' in filtered_df.columns and not filtered_df['Date'].isna().all()
+                             else "date range not applicable"),
+                'categories': (filtered_df['Category'].unique().tolist()
+                             if 'Category' in filtered_df.columns
+                             else []),
+                'total_spending': (filtered_df[filtered_df['Type'] == 'Expense']['Amount'].sum()
                                  if 'Type' in filtered_df.columns and 'Amount' in filtered_df.columns
-                                 else df[df['Type'] == 'Expense']['Amount'].sum()),
+                                 else 0.0),
                 'total_income': (filtered_df[filtered_df['Type'] == 'Income']['Amount'].sum()
                                if 'Type' in filtered_df.columns and 'Amount' in filtered_df.columns
-                               else df[df['Type'] == 'Income']['Amount'].sum()),
-                'transactions': json.loads(df.to_json(orient='records', date_format='iso'))
+                               else 0.0),
+                'transactions': (json.loads(filtered_df.to_json(orient='records', date_format='iso'))
+                               if not filtered_df.empty
+                               else [])
             }
             
             # Generate analysis using OpenAI
@@ -133,9 +172,9 @@ class AnalysisService:
         If it's about specific categories or time periods, provide focused analysis on those aspects.
         """
 
-    def _add_charts_to_analysis(self, analysis: str, df: pd.DataFrame) -> str:
+    def _add_charts_to_analysis(self, analysis: str, filtered_df: pd.DataFrame) -> str:
         """Add charts to the analysis and return updated analysis text"""
-        category_spending = df[df['Type'] == 'Expense'].groupby('Category')['Amount'].sum()
+        category_spending = filtered_df[filtered_df['Type'] == 'Expense'].groupby('Category')['Amount'].sum()
         chart_data = pd.DataFrame({
             'Category': category_spending.index,
             'Amount': category_spending.values
