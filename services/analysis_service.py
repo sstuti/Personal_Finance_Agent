@@ -16,11 +16,19 @@ class AnalysisService:
 
     def _get_schema(self) -> str:
         return """
-            Date DATE,           -- Stored in YYYY-MM-DD format
-            Description TEXT,    -- Text description of the transaction
-            Amount FLOAT,       -- Positive number representing transaction amount
-            Category TEXT,      -- Transaction category (e.g., Food, Transport, Salary)
-            Type TEXT          -- Either "Income" or "Expense"
+        Table name: Expenses
+        Columns:
+        - Date DATE             # Format: YYYY-MM-DD
+        - Description TEXT      # Transaction description
+        - Amount FLOAT         # Transaction amount (positive number)
+        - Category TEXT        # e.g., Food, Transport, Salary
+        - Type TEXT           # Either "Income" or "Expense"
+        
+        Instructions: 
+        1. Table name is 'Expenses'
+        2. Return ONLY the SQL query
+        3. Do not include any explanations or prefixes
+        4. Do not include 'SQL Query:' or similar text
         """
 
     def analyze_spending(self, query: str) -> str:
@@ -46,21 +54,24 @@ class AnalysisService:
             model = create_model(llm=llm)
             model.load_schema_as_string(self._get_schema())
 
-            # Convert user's query to SQL
-            llm_output = get_sql_query(model, query)
-            sql_query = llm_output.message
-
-            print('SQL Query:', sql_query)
+            # Convert user's query to SQL and extract the message
+            model_output = get_sql_query(model, query)
+            sql_query = model_output.message if hasattr(model_output, 'message') else str(model_output)
+            sql_query = sql_query.strip()
+            print(f"Query was: {sql_query}")
             
             # Execute SQL query
             conn = sqlite3.connect(':memory:')
             df.to_sql('Expenses', conn, index=False, if_exists='replace')
             
             try:
+                if not isinstance(sql_query, str):
+                    raise ValueError(f"Invalid SQL query type: {type(sql_query)}. Expected string.")
                 result_df = pd.read_sql_query(sql_query, conn)
                 filtered_df = result_df
             except Exception as e:
                 print(f"Error executing SQL query: {e}")
+                print(f"Query was: {sql_query}")
                 filtered_df = df
             finally:
                 conn.close()
@@ -68,11 +79,17 @@ class AnalysisService:
             # Prepare data context for analysis
             data_context = {
                 'total_transactions': len(filtered_df),
-                'date_range': f"from {filtered_df['Date'].min().strftime('%Y-%m-%d')} to {filtered_df['Date'].max().strftime('%Y-%m-%d')}",
-                'categories': filtered_df['Category'].unique().tolist(),
-                'total_spending': filtered_df[filtered_df['Type'] == 'Expense']['Amount'].sum(),
-                'total_income': filtered_df[filtered_df['Type'] == 'Income']['Amount'].sum(),
-                'transactions': json.loads(filtered_df.to_json(orient='records', date_format='iso'))
+                'date_range': (f"from {df['Date'].min().strftime('%Y-%m-%d')} to {df['Date'].max().strftime('%Y-%m-%d')}" 
+                             if 'Date' in df.columns else "all time"),
+                'categories': (filtered_df['Category'].unique().tolist() 
+                             if 'Category' in filtered_df.columns else df['Category'].unique().tolist()),
+                'total_spending': (filtered_df[filtered_df['Type'] == 'Expense']['Amount'].sum() 
+                                 if 'Type' in filtered_df.columns and 'Amount' in filtered_df.columns
+                                 else df[df['Type'] == 'Expense']['Amount'].sum()),
+                'total_income': (filtered_df[filtered_df['Type'] == 'Income']['Amount'].sum()
+                               if 'Type' in filtered_df.columns and 'Amount' in filtered_df.columns
+                               else df[df['Type'] == 'Income']['Amount'].sum()),
+                'transactions': json.loads(df.to_json(orient='records', date_format='iso'))
             }
             
             # Generate analysis using OpenAI
