@@ -8,3 +8,4 @@ jupyter>=1.0.0
 langchain
 langchain_community
 text_to_sql
+pandasql

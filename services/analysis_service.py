@@ -16,23 +16,43 @@ class AnalysisService:
 
     def _get_schema(self) -> str:
         return """
-        Available Columns:
-        - Date DATE             # Format: YYYY-MM-DD
-        - Description TEXT      # Transaction description
-        - Amount FLOAT         # Transaction amount (positive number)
-        - Category TEXT        # e.g., Food, Transport, Salary
-        - Type TEXT           # Either "Income" or "Expense"
-        
-        Instructions: 
-        1. Output format must be EXACTLY like these examples (no prefixes, no explanations):
-           SELECT * FROM df WHERE Type = 'Expense'
-           SELECT Category, SUM(Amount) FROM df GROUP BY Category
-           
-        2. IMPORTANT:
-           - Start directly with SELECT
-           - Use "df" as the table name
-           - Do not include "SQL query:" or any other prefix
-           - No comments or explanations, just the SQL query
+        Table Name: df
+        This table contains all financial transactions with the following columns:
+
+        Table Schema:
+        CREATE TABLE df (
+            Date DATE,             -- Transaction date in YYYY-MM-DD format
+            Description TEXT,      -- What the transaction was for
+            Amount FLOAT,         -- How much money (positive number)
+            Category TEXT,        -- Transaction category (Food, Transport, Salary, etc.)
+            Type TEXT            -- Either "Income" or "Expense"
+        );
+
+        Example Queries:
+        -- For general category analysis (show all transactions):
+        SELECT Date, Description, Amount, Category, Type 
+        FROM df 
+        WHERE Type = 'Expense' AND Category LIKE '%food%' 
+        ORDER BY Date DESC;
+
+        -- For summary analysis (when specifically asked for totals):
+        SELECT Category, SUM(Amount) as Total 
+        FROM df 
+        WHERE Type = 'Expense' 
+        GROUP BY Category;
+
+        -- For time-based analysis:
+        SELECT strftime('%Y-%m', Date) as Month, SUM(Amount) as Total 
+        FROM df 
+        WHERE Type = 'Expense' 
+        GROUP BY Month 
+        ORDER BY Month;
+
+        Rules:
+        1. ALWAYS use 'df' as the table name
+        2. Start with SELECT
+        3. No prefixes or explanations
+        4. Return only the SQL query
         """
 
     def analyze_spending(self, query: str) -> str:
@@ -58,18 +78,69 @@ class AnalysisService:
             model = create_model(llm=llm)
             model.load_schema_as_string(self._get_schema())
 
-            # Convert user's query to SQL and extract the message
-            model_output = get_sql_query(model, query)
-            sql_query = model_output.message if hasattr(model_output, 'message') else str(model_output)
-            sql_query = sql_query.strip()
+            # Create an enhanced prompt for SQL query generation
+            enhanced_prompt = f"""
+You are a SQL expert working with financial transaction data. The data is stored in a table named 'df'.
+
+User Question: "{query}"
+
+Write a SQL query to analyze this data. Follow these guidelines:
+1. For category analysis (e.g., "show food expenses", "analyze travel spending"):
+   - Use: SELECT Date, Description, Amount, Category, Type FROM df WHERE Type = 'Expense' AND Category LIKE '%category%'
+   - DO NOT use SUM() unless specifically asked for totals
+   - Order by Date DESC
+
+2. Only use aggregations (SUM, COUNT, AVG) when explicitly asked for:
+   - "total spending in food" -> use SUM
+   - "how many transactions" -> use COUNT
+   - "average spending" -> use AVG
+
+3. Default filters:
+   - For spending analysis: WHERE Type = 'Expense'
+   - For income analysis: WHERE Type = 'Income'
+
+4. For monthly trends, use:
+   strftime('%Y-%m', Date) as Month
+
+5. For unclear requests:
+   SELECT * FROM df ORDER BY Date DESC LIMIT 10
+
+{self._get_schema()}
+
+Important:
+- Return ONLY the SQL query
+- Do not include any explanations
+- If the request is unclear, use the default SELECT query
+- Make sure to always use 'df' as the table name
+"""
+            # Convert enhanced prompt to SQL and validate
+            def clean_sql_query(raw_query: str) -> str:
+                """Clean and validate SQL query"""
+                # Extract query if it's wrapped in a message
+                query = raw_query.message if hasattr(raw_query, 'message') else str(raw_query)
+                query = query.strip()
+                
+                # Remove common prefixes
+                prefixes = ['sql query:', 'query:', 'sql:', 'here\'s the sql query:', 'sql statement:']
+                for prefix in prefixes:
+                    if query.lower().startswith(prefix):
+                        query = query[len(prefix):].strip()
+                
+                # Validate basic SQL structure
+                if not query.lower().startswith('select'):
+                    return "SELECT * FROM df ORDER BY Date DESC LIMIT 10"
+                
+                if 'from' not in query.lower():
+                    return "SELECT * FROM df ORDER BY Date DESC LIMIT 10"
+                
+                return query
+
+            # Get and clean SQL query
+            model_output = get_sql_query(model, enhanced_prompt)
+            sql_query = clean_sql_query(model_output)
             
-            # Clean up the SQL query by removing common prefixes and extra whitespace
-            common_prefixes = ['sql query:', 'query:', 'sql:']
-            for prefix in common_prefixes:
-                if sql_query.lower().startswith(prefix):
-                    sql_query = sql_query[len(prefix):].strip()
-            
-            # Replace 'Expenses' with 'df' in the query if needed
+            # Replace incompatible SQL syntax with SQLite compatible versions
+            sql_query = sql_query.replace(' ILIKE ', ' LIKE ')  # SQLite doesn't support ILIKE
             sql_query = sql_query.replace(' Expenses ', ' df ')
             sql_query = sql_query.replace('FROM Expenses', 'FROM df')
             sql_query = sql_query.replace('JOIN Expenses', 'JOIN df')
@@ -136,7 +207,7 @@ class AnalysisService:
             response = self.client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
-                    {"role": "system", "content": "You are a financial analyst providing insights from transaction data. Be specific and include numerical details when relevant."},
+                    {"role": "system", "content": "You are a professional financial analyst. Provide only data-driven insights using bullet points. Focus on numbers, percentages, and key trends. No recommendations or tips - just facts and analysis."},
                     {"role": "user", "content": prompt}
                 ]
             )
@@ -155,21 +226,22 @@ class AnalysisService:
     def _create_analysis_prompt(self, query: str, data_context: Dict[str, Any]) -> str:
         """Create the analysis prompt with the given context"""
         return f"""
-        Analyze the following financial data based on this query: "{query}"
+        Query: "{query}"
 
-        Summary:
-        - {data_context['total_transactions']} transactions
-        - Date range: {data_context['date_range']}
-        - Categories: {', '.join(data_context['categories'])}
-        - Total spending: ${data_context['total_spending']:.2f}
-        - Total income: ${data_context['total_income']:.2f}
-
-        Detailed transactions:
+        Data Summary:
+        - Total: {data_context['total_transactions']} transactions
+        - Period: {data_context['date_range']}
+        - Spending: ${data_context['total_spending']:.2f}
+        - Income: ${data_context['total_income']:.2f}
+        
+        Details:
         {json.dumps(data_context['transactions'], indent=2)}
 
-        Generate a detailed analysis focusing on the user's query. Include relevant statistics and insights.
-        If the query asks for comparisons or trends, calculate and include them.
-        If it's about specific categories or time periods, provide focused analysis on those aspects.
+        Return only:
+        - Key metrics and percentages
+        - Notable trends
+        - Significant changes in numbers
+        No tips, recommendations, or suggestions.
         """
 
     def _add_charts_to_analysis(self, analysis: str, filtered_df: pd.DataFrame) -> str:
