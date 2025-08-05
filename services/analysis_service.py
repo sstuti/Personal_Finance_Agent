@@ -29,14 +29,24 @@ class AnalysisService:
         );
 
         Example Queries:
-        -- Get all expenses:
-        SELECT * FROM df WHERE Type = 'Expense';
+        -- For general category analysis (show all transactions):
+        SELECT Date, Description, Amount, Category, Type 
+        FROM df 
+        WHERE Type = 'Expense' AND Category LIKE '%food%' 
+        ORDER BY Date DESC;
 
-        -- Sum by category:
-        SELECT Category, SUM(Amount) FROM df GROUP BY Category;
+        -- For summary analysis (when specifically asked for totals):
+        SELECT Category, SUM(Amount) as Total 
+        FROM df 
+        WHERE Type = 'Expense' 
+        GROUP BY Category;
 
-        -- Monthly totals:
-        SELECT strftime('%Y-%m', Date) as Month, SUM(Amount) as Total FROM df GROUP BY Month;
+        -- For time-based analysis:
+        SELECT strftime('%Y-%m', Date) as Month, SUM(Amount) as Total 
+        FROM df 
+        WHERE Type = 'Expense' 
+        GROUP BY Month 
+        ORDER BY Month;
 
         Rules:
         1. ALWAYS use 'df' as the table name
@@ -75,11 +85,25 @@ You are a SQL expert working with financial transaction data. The data is stored
 User Question: "{query}"
 
 Write a SQL query to analyze this data. Follow these guidelines:
-1. The data is in table 'df'
-2. For unclear requests, use: SELECT * FROM df ORDER BY Date DESC LIMIT 10
-3. For spending analysis, filter Type = 'Expense'
-4. For income analysis, filter Type = 'Income'
-5. For trends, use strftime('%Y-%m', Date) for monthly grouping
+1. For category analysis (e.g., "show food expenses", "analyze travel spending"):
+   - Use: SELECT Date, Description, Amount, Category, Type FROM df WHERE Type = 'Expense' AND Category LIKE '%category%'
+   - DO NOT use SUM() unless specifically asked for totals
+   - Order by Date DESC
+
+2. Only use aggregations (SUM, COUNT, AVG) when explicitly asked for:
+   - "total spending in food" -> use SUM
+   - "how many transactions" -> use COUNT
+   - "average spending" -> use AVG
+
+3. Default filters:
+   - For spending analysis: WHERE Type = 'Expense'
+   - For income analysis: WHERE Type = 'Income'
+
+4. For monthly trends, use:
+   strftime('%Y-%m', Date) as Month
+
+5. For unclear requests:
+   SELECT * FROM df ORDER BY Date DESC LIMIT 10
 
 {self._get_schema()}
 
@@ -115,7 +139,8 @@ Important:
             model_output = get_sql_query(model, enhanced_prompt)
             sql_query = clean_sql_query(model_output)
             
-            # Replace 'Expenses' with 'df' in the query if needed
+            # Replace incompatible SQL syntax with SQLite compatible versions
+            sql_query = sql_query.replace(' ILIKE ', ' LIKE ')  # SQLite doesn't support ILIKE
             sql_query = sql_query.replace(' Expenses ', ' df ')
             sql_query = sql_query.replace('FROM Expenses', 'FROM df')
             sql_query = sql_query.replace('JOIN Expenses', 'JOIN df')
@@ -182,7 +207,7 @@ Important:
             response = self.client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
-                    {"role": "system", "content": "You are a financial analyst providing insights from transaction data. Be specific and include numerical details when relevant."},
+                    {"role": "system", "content": "You are a professional financial analyst. Provide only data-driven insights using bullet points. Focus on numbers, percentages, and key trends. No recommendations or tips - just facts and analysis."},
                     {"role": "user", "content": prompt}
                 ]
             )
@@ -201,14 +226,22 @@ Important:
     def _create_analysis_prompt(self, query: str, data_context: Dict[str, Any]) -> str:
         """Create the analysis prompt with the given context"""
         return f"""
-        Analyze the following financial data based on this query: "{query}"
+        Query: "{query}"
 
-        Detailed transactions:
+        Data Summary:
+        - Total: {data_context['total_transactions']} transactions
+        - Period: {data_context['date_range']}
+        - Spending: ${data_context['total_spending']:.2f}
+        - Income: ${data_context['total_income']:.2f}
+        
+        Details:
         {json.dumps(data_context['transactions'], indent=2)}
 
-        Generate a detailed analysis focusing on the user's query. Include relevant statistics and insights.
-        If the query asks for comparisons or trends, calculate and include them.
-        If it's about specific categories or time periods, provide focused analysis on those aspects.
+        Return only:
+        - Key metrics and percentages
+        - Notable trends
+        - Significant changes in numbers
+        No tips, recommendations, or suggestions.
         """
 
     def _add_charts_to_analysis(self, analysis: str, filtered_df: pd.DataFrame) -> str:
